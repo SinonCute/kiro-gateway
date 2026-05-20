@@ -22,6 +22,8 @@ from kiro.models_anthropic import (
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    ServerToolUseContentBlock,
+    WebSearchToolResultContentBlock,
     # Image models
     Base64ImageSource,
     URLImageSource,
@@ -522,6 +524,91 @@ class TestAnthropicMessageWithImages:
         print(f"Comparing content[1].source.type: Expected 'url', Got '{message.content[1].source.type}'")
         assert message.content[1].source.type == "url"
         assert message.content[1].source.url == "https://example.com/image.jpg"
+
+
+# ==================================================================================================
+# Tests for ServerToolUse / WebSearchToolResult round-trip blocks
+# ==================================================================================================
+
+class TestServerSideWebSearchBlocks:
+    """
+    Tests for server-side web_search blocks echoed back by clients.
+
+    Anthropic's server-side web_search tool produces server_tool_use and
+    web_search_tool_result blocks in the assistant's response. Clients like
+    Claude Code replay them on subsequent turns. The gateway must accept
+    them in the request schema (they get dropped before reaching Kiro).
+    """
+
+    def test_server_tool_use_block_validates(self):
+        """ServerToolUseContentBlock accepts the shape Anthropic emits."""
+        block = ServerToolUseContentBlock(
+            id="srvtoolu_d2964a653b3f4c4b9bf72156dbda792f",
+            name="web_search",
+            input={"query": "prompting tips"},
+        )
+        assert block.type == "server_tool_use"
+        assert block.name == "web_search"
+
+    def test_web_search_tool_result_block_validates(self):
+        """WebSearchToolResultContentBlock accepts a list-of-results content."""
+        block = WebSearchToolResultContentBlock(
+            tool_use_id="srvtoolu_d2964a653b3f4c4b9bf72156dbda792f",
+            content=[
+                {
+                    "type": "web_search_result",
+                    "title": "Example",
+                    "url": "https://example.com",
+                    "encrypted_content": "...",
+                    "page_age": None,
+                }
+            ],
+        )
+        assert block.type == "web_search_tool_result"
+        assert isinstance(block.content, list)
+        assert block.content[0]["title"] == "Example"
+
+    def test_request_with_server_side_web_search_history_validates(self):
+        """
+        Regression test: full request replaying a prior server-side web_search
+        turn must validate (was a 422 before the fix).
+        """
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4-5",
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": "research prompting"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_abc",
+                            "name": "web_search",
+                            "input": {"query": "prompting"},
+                        },
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": "srvtoolu_abc",
+                            "content": [
+                                {
+                                    "type": "web_search_result",
+                                    "title": "X",
+                                    "url": "https://x.example",
+                                    "encrypted_content": "abc",
+                                    "page_age": None,
+                                }
+                            ],
+                        },
+                        {"type": "text", "text": "Here's a summary."},
+                    ],
+                },
+                {"role": "user", "content": "go deeper"},
+            ],
+        )
+        assistant = request.messages[1]
+        types = [b.type for b in assistant.content]
+        assert types == ["server_tool_use", "web_search_tool_result", "text"]
 
 
 # ==================================================================================================

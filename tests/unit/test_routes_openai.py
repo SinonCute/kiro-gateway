@@ -199,6 +199,17 @@ class TestRootEndpoint:
         print(f"Status: {response.status_code}")
         assert response.status_code == 200
 
+    def test_root_head_returns_200(self, test_client):
+        """
+        What it does: Verifies root endpoint accepts HEAD requests.
+        Purpose: Ensure client preflight probes can validate the base URL.
+        """
+        print("Action: HEAD /...")
+        response = test_client.head("/")
+
+        print(f"Status: {response.status_code}")
+        assert response.status_code == 200
+
 
 # =============================================================================
 # Tests for health endpoint (/health)
@@ -379,6 +390,71 @@ class TestModelsEndpoint:
         
         for model in response.json()["data"]:
             assert model["owned_by"] == "anthropic"
+
+    def test_models_supports_anthropic_format(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies /v1/models can return Anthropic-style pagination.
+        Purpose: Ensure Claude Code gateway bootstrap can validate model discovery.
+        """
+        print("Action: GET /v1/models with Anthropic headers...")
+        response = test_client.get(
+            "/v1/models?limit=1000",
+            headers={
+                "x-api-key": valid_proxy_api_key,
+                "anthropic-version": "2023-06-01",
+            }
+        )
+
+        print(f"Result: {response.json()}")
+        assert response.status_code == 200
+        assert "data" in response.json()
+        assert "has_more" in response.json()
+        assert "first_id" in response.json()
+        assert "last_id" in response.json()
+        assert response.json()["has_more"] is False
+
+    def test_models_supports_anthropic_hyphenated_aliases(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies Anthropic discovery includes hyphenated minor versions.
+        Purpose: Ensure Claude Code can find models like claude-sonnet-4-5.
+        """
+        print("Action: GET /v1/models with Anthropic headers...")
+        response = test_client.get(
+            "/v1/models?limit=1000",
+            headers={
+                "x-api-key": valid_proxy_api_key,
+                "anthropic-version": "2023-06-01",
+            }
+        )
+
+        print(f"Result: {response.json()}")
+        assert response.status_code == 200
+
+        model_ids = [model["id"] for model in response.json()["data"]]
+        print(f"Anthropic model IDs: {model_ids}")
+        assert "claude-opus-4-5" in model_ids
+        assert "claude-haiku-4-5" in model_ids
+
+    def test_model_details_supports_anthropic_format(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies /v1/models/{model_id} returns Anthropic-style metadata.
+        Purpose: Ensure Anthropic SDK-compatible model detail fetches succeed.
+        """
+        print("Action: GET /v1/models/claude-opus-4-5 with Anthropic headers...")
+        response = test_client.get(
+            "/v1/models/claude-opus-4-5",
+            headers={
+                "x-api-key": valid_proxy_api_key,
+                "anthropic-version": "2023-06-01",
+            }
+        )
+
+        print(f"Result: {response.json()}")
+        assert response.status_code == 200
+        assert response.json()["id"] == "claude-opus-4-5"
+        assert response.json()["type"] == "model"
+        assert "display_name" in response.json()
+        assert "created_at" in response.json()
 
 
 # =============================================================================
