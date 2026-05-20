@@ -251,6 +251,44 @@ class TestCallKiroMCPAPI:
         assert tool_use_id is None
         assert results is None
 
+    @pytest.mark.asyncio
+    async def test_mcp_api_sends_profile_arn_at_top_level(self, mock_auth_manager):
+        """
+        What it does: Verifies the request body contains profileArn as a top-level
+        field (sibling of id/jsonrpc/method/params), not nested inside params.
+        Purpose: runtime.kiro.dev rejects requests with HTTP 400 "profileArn is
+        required for this request" unless profileArn appears at the top level of
+        the JSON-RPC body. This guards against a regression of that bug.
+        """
+        print("Setup: Mocking successful MCP API response and capturing request body...")
+        query = "test query"
+
+        mock_response_data = {
+            "id": "web_search_tooluse_x_1_y",
+            "jsonrpc": "2.0",
+            "result": {
+                "content": [{"type": "text", "text": json.dumps({"results": [], "totalResults": 0})}],
+                "isError": False,
+            },
+        }
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json = Mock(return_value=mock_response_data)
+
+        mock_post = AsyncMock(return_value=mock_response)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value.post = mock_post
+
+        print("Action: Calling call_kiro_mcp_api and inspecting the sent body...")
+        with patch("kiro.mcp_tools.httpx.AsyncClient", return_value=mock_client):
+            tool_use_id, results = await call_kiro_mcp_api(query, mock_auth_manager)
+
+        assert tool_use_id is not None
+        sent_body = mock_post.call_args.kwargs["json"]
+        print(f"Checking top-level profileArn in body keys: {list(sent_body.keys())}")
+        assert sent_body.get("profileArn") == mock_auth_manager.profile_arn
+        assert "profileArn" not in sent_body["params"]
+
 
 # ==================================================================================================
 # Tests for Search Summary Generation
