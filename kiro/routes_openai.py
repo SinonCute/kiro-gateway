@@ -67,6 +67,21 @@ api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 anthropic_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
 
+def _verify_openai_api_key_header(auth_header: Optional[str]) -> None:
+    """
+    Validate OpenAI-style Authorization header.
+
+    Args:
+        auth_header: Authorization header value
+
+    Raises:
+        HTTPException: 401 if key is invalid or missing
+    """
+    if not auth_header or auth_header != f"Bearer {PROXY_API_KEY}":
+        logger.warning("Access attempt with invalid API key.")
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+
 async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
     """
     Verify API key in Authorization header.
@@ -82,9 +97,7 @@ async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
-    if not auth_header or auth_header != f"Bearer {PROXY_API_KEY}":
-        logger.warning("Access attempt with invalid API key.")
-        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    _verify_openai_api_key_header(auth_header)
     return True
 
 
@@ -329,7 +342,7 @@ async def get_models(
             after_id=after_id,
         )
 
-    await verify_api_key(authorization)
+    _verify_openai_api_key_header(authorization)
 
     openai_models = [
         OpenAIModel(
