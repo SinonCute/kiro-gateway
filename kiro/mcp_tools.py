@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
 from kiro.tokenizer import count_message_tokens, count_tokens
+from kiro.config import PROFILE_ARN
 
 # Import debug_logger
 try:
@@ -100,8 +101,12 @@ async def call_kiro_mcp_api(
             "params": {
                 "name": "web_search",
                 "arguments": {"query": "..."}
-            }
+            },
+            "profileArn": "arn:aws:codewhisperer:..."
         }
+
+    Note: profileArn is REQUIRED by runtime.kiro.dev (post AWS migration on
+    2026-05-15). It must be at the top level of the body, not inside params.
     
     MCP Response Format:
         {
@@ -124,7 +129,12 @@ async def call_kiro_mcp_api(
     random_8 = generate_random_id(8)
     request_id = f"web_search_tooluse_{random_22}_{timestamp}_{random_8}"
     tool_use_id = f"srvtoolu_{uuid.uuid4().hex[:32]}"
-    
+
+    # profileArn is required by runtime.kiro.dev for all auth types.
+    # Sent at top level of the JSON-RPC body (sibling of id/jsonrpc/method/params),
+    # not inside params. Without it, the endpoint returns 400 "profileArn is required".
+    profile_arn = auth_manager.profile_arn or PROFILE_ARN or ""
+
     # Build MCP request
     mcp_request = {
         "id": request_id,
@@ -135,6 +145,8 @@ async def call_kiro_mcp_api(
             "arguments": {"query": query}
         }
     }
+    if profile_arn:
+        mcp_request["profileArn"] = profile_arn
     
     # Log MCP request
     try:
