@@ -28,8 +28,9 @@ Contains all API endpoints:
 
 import json
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security, Header, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from loguru import logger
@@ -63,6 +64,22 @@ except ImportError:
 
 # --- Security scheme ---
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+anthropic_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+
+
+def _verify_openai_api_key_header(auth_header: Optional[str]) -> None:
+    """
+    Validate OpenAI-style Authorization header.
+
+    Args:
+        auth_header: Authorization header value
+
+    Raises:
+        HTTPException: 401 if key is invalid or missing
+    """
+    if not auth_header or auth_header != f"Bearer {PROXY_API_KEY}":
+        logger.warning("Access attempt with invalid API key.")
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
 
 async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
@@ -80,17 +97,181 @@ async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
-    if not auth_header or auth_header != f"Bearer {PROXY_API_KEY}":
-        logger.warning("Access attempt with invalid API key.")
-        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    _verify_openai_api_key_header(auth_header)
     return True
+
+
+def _is_anthropic_models_request(
+    anthropic_version: Optional[str],
+    x_api_key: Optional[str],
+) -> bool:
+    """
+    Detect whether /v1/models is being called as an Anthropic-compatible endpoint.
+
+    Args:
+        anthropic_version: Value of the anthropic-version header
+        x_api_key: Value of the x-api-key header
+
+    Returns:
+        True when the request should use Anthropic auth/response semantics
+    """
+    return anthropic_version is not None or x_api_key is not None
+
+
+def _verify_anthropic_models_api_key(
+    authorization: Optional[str],
+    x_api_key: Optional[str],
+) -> None:
+    """
+    Validate Anthropic-style credentials for the shared /v1/models endpoint.
+
+    Args:
+        authorization: Authorization header value
+        x_api_key: x-api-key header value
+
+    Raises:
+        HTTPException: If no valid Anthropic-compatible credential is present
+    """
+    if x_api_key == PROXY_API_KEY:
+        return
+
+    if authorization == f"Bearer {PROXY_API_KEY}":
+        return
+
+    logger.warning("Access attempt with invalid API key (Anthropic models endpoint)")
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "invalid x-api-key",
+            },
+        },
+    )
+
+
+def _get_available_model_ids(request: Request) -> List[str]:
+    """
+    Return the currently available model IDs.
+
+    Args:
+        request: FastAPI request with initialized application state
+
+    Returns:
+        Available model IDs from the account system or legacy resolver
+    """
+    if request.app.state.account_system:
+        return request.app.state.account_manager.get_all_available_models()
+
+    account = request.app.state.account_manager.get_first_account()
+    return account.model_resolver.get_available_models()
+
+
+def _get_anthropic_model_aliases(model_id: str) -> List[str]:
+    """
+    Generate Anthropic-facing aliases for a gateway model ID.
+
+    Claude Code uses hyphenated minor versions such as ``claude-sonnet-4-6``,
+    while Kiro surfaces dotted versions such as ``claude-sonnet-4.6``.
+    The gateway accepts both when generating/chatting, so discovery should
+    advertise both forms.
+
+    Args:
+        model_id: Gateway model identifier
+
+    Returns:
+        Ordered list of equivalent model IDs to expose to Anthropic clients
+    """
+    aliases = [model_id]
+
+    if "." in model_id:
+        aliases.append(model_id.replace(".", "-"))
+
+    return aliases
+
+
+def _format_anthropic_display_name(model_id: str) -> str:
+    """
+    Build a human-readable display name for Anthropic model discovery.
+
+    Args:
+        model_id: Model identifier exposed by the gateway
+
+    Returns:
+        Display label suitable for Anthropic-style model lists
+    """
+    return " ".join(part.capitalize() for part in model_id.replace(".", "-").split("-"))
+
+
+def _build_anthropic_model_page(
+    available_model_ids: List[str],
+    limit: int,
+    before_id: Optional[str],
+    after_id: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Build an Anthropic-compatible paginated model list.
+
+    Args:
+        available_model_ids: Raw gateway model IDs
+        limit: Maximum number of results to return
+        before_id: Optional exclusive upper cursor
+        after_id: Optional exclusive lower cursor
+
+    Returns:
+        Anthropic-style model page payload
+    """
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    expanded_models: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for model_id in available_model_ids:
+        for alias in _get_anthropic_model_aliases(model_id):
+            if alias in seen_ids:
+                continue
+            seen_ids.add(alias)
+            expanded_models.append(
+                {
+                    "type": "model",
+                    "id": alias,
+                    "display_name": _format_anthropic_display_name(alias),
+                    "created_at": now,
+                }
+            )
+
+    start_index = 0
+    end_index = len(expanded_models)
+
+    if after_id is not None:
+        for index, model in enumerate(expanded_models):
+            if model["id"] == after_id:
+                start_index = index + 1
+                break
+
+    if before_id is not None:
+        for index, model in enumerate(expanded_models):
+            if model["id"] == before_id:
+                end_index = index
+                break
+
+    window = expanded_models[start_index:end_index]
+    page = window[:limit]
+    has_more = len(window) > len(page)
+
+    return {
+        "data": page,
+        "has_more": has_more,
+        "first_id": page[0]["id"] if page else None,
+        "last_id": page[-1]["id"] if page else None,
+    }
 
 
 # --- Router ---
 router = APIRouter()
 
 
-@router.get("/")
+@router.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """
     Health check endpoint.
@@ -119,32 +300,50 @@ async def health():
         "version": APP_VERSION
     }
 
-@router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
-async def get_models(request: Request):
+@router.get("/v1/models")
+async def get_models(
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_api_key: Optional[str] = Security(anthropic_api_key_header),
+    anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
+    limit: int = Query(1000, ge=1, le=1000),
+    before_id: Optional[str] = Query(None),
+    after_id: Optional[str] = Query(None),
+):
     """
     Return list of available models.
     
-    Models are loaded at startup (blocking) and cached.
-    This endpoint returns the cached list.
+    This endpoint is shared by both compatibility surfaces:
+    - OpenAI clients receive the legacy OpenAI-style model list
+    - Anthropic clients receive an Anthropic-style paginated model list
     
     Args:
         request: FastAPI Request for accessing app.state
+        authorization: Optional Authorization header
+        x_api_key: Optional Anthropic x-api-key header
+        anthropic_version: Optional Anthropic API version header
+        limit: Maximum number of models to return for Anthropic-style requests
+        before_id: Anthropic pagination cursor
+        after_id: Anthropic pagination cursor
     
     Returns:
-        ModelList with available models in consistent format (with dots)
+        OpenAI-compatible ModelList or Anthropic-compatible paginated response
     """
     logger.info("Request to /v1/models")
-    
-    # Get available models based on mode
-    if request.app.state.account_system:
-        # Account system: collect models from all initialized accounts
-        available_model_ids = request.app.state.account_manager.get_all_available_models()
-    else:
-        # Legacy: use resolver from first account
-        account = request.app.state.account_manager.get_first_account()
-        available_model_ids = account.model_resolver.get_available_models()
-    
-    # Build OpenAI-compatible model list
+
+    available_model_ids = _get_available_model_ids(request)
+
+    if _is_anthropic_models_request(anthropic_version, x_api_key):
+        _verify_anthropic_models_api_key(authorization, x_api_key)
+        return _build_anthropic_model_page(
+            available_model_ids=available_model_ids,
+            limit=limit,
+            before_id=before_id,
+            after_id=after_id,
+        )
+
+    _verify_openai_api_key_header(authorization)
+
     openai_models = [
         OpenAIModel(
             id=model_id,
@@ -155,6 +354,58 @@ async def get_models(request: Request):
     ]
     
     return ModelList(data=openai_models)
+
+
+@router.get("/v1/models/{model_id}")
+async def get_model_details(
+    request: Request,
+    model_id: str,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_api_key: Optional[str] = Security(anthropic_api_key_header),
+    anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
+):
+    """
+    Return Anthropic-compatible details for a specific model.
+
+    Args:
+        request: FastAPI Request for accessing app.state
+        model_id: Model identifier requested by the client
+        authorization: Optional Authorization header
+        x_api_key: Optional Anthropic x-api-key header
+        anthropic_version: Optional Anthropic API version header
+
+    Returns:
+        Anthropic-compatible model metadata
+
+    Raises:
+        HTTPException: If the request is not Anthropic-compatible or the model is unknown
+    """
+    if not _is_anthropic_models_request(anthropic_version, x_api_key):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    _verify_anthropic_models_api_key(authorization, x_api_key)
+
+    page = _build_anthropic_model_page(
+        available_model_ids=_get_available_model_ids(request),
+        limit=1000,
+        before_id=None,
+        after_id=None,
+    )
+
+    for model in page["data"]:
+        if model["id"] == model_id:
+            return model
+
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "type": "error",
+            "error": {
+                "type": "not_found_error",
+                "message": f"model '{model_id}' not found",
+            },
+        },
+    )
 
 
 @router.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])

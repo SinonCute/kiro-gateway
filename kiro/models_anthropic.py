@@ -92,6 +92,39 @@ class ToolReferenceContentBlock(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class ServerToolUseContentBlock(BaseModel):
+    """
+    Server-side tool use block (Anthropic web_search and similar).
+
+    Echoed back by clients (e.g. Claude Code) on multi-turn conversations
+    where a prior assistant turn invoked a server-side tool. Treated as
+    opaque history — not forwarded to Kiro upstream.
+    """
+
+    type: Literal["server_tool_use"] = "server_tool_use"
+    id: str
+    name: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchToolResultContentBlock(BaseModel):
+    """
+    Server-side web_search tool result block.
+
+    Counterpart to ServerToolUseContentBlock. Carries the search results
+    list (or an error object) as returned by Anthropic's server-side
+    web_search. Treated as opaque history — not forwarded to Kiro.
+    """
+
+    type: Literal["web_search_tool_result"] = "web_search_tool_result"
+    tool_use_id: str
+    content: Union[List[Dict[str, Any]], Dict[str, Any]]
+
+    model_config = {"extra": "allow"}
+
+
 class ToolResultContentBlock(BaseModel):
     """
     Tool result content block in Anthropic format.
@@ -170,6 +203,8 @@ ContentBlock = Union[
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    ServerToolUseContentBlock,
+    WebSearchToolResultContentBlock,
 ]
 
 
