@@ -668,17 +668,15 @@ class AccountManager:
                 account_id = list(self._accounts.keys())[0]
                 account = self._accounts[account_id]
                 
-                # Skip if already tried in current failover loop
                 if exclude_accounts and account_id in exclude_accounts:
                     return None
                 
-                # Lazy initialization if needed
+                # Clean Fix: Fallback to the account's parsed configuration path
                 if account.auth_manager is None:
                     success = await self._initialize_account(account_id)
                     if not success:
                         return None
                 
-                # Check TTL and refresh if needed
                 if account.models_cached_at > 0:
                     age = time.time() - account.models_cached_at
                     if age > ACCOUNT_CACHE_TTL:
@@ -686,15 +684,7 @@ class AccountManager:
                             await self._refresh_account_models(account_id)
                         except Exception as e:
                             logger.warning(f"Failed to refresh models for {account_id}: {e}")
-                # # Validate model availability
-                # if account.model_resolver:
-                #     normalized_model = normalize_model_name(model)
-                #     available_models = account.model_resolver.get_available_models()
-                #     if normalized_model not in available_models:
-                #         return None
                 
-                # Always return single account (ignore cooldown/failures)
-                # No model validation - let Kiro API decide (gateway, not gatekeeper)
                 return account
             
             # Multi-account logic: GLOBAL sticky
