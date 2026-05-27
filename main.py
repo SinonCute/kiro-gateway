@@ -474,10 +474,7 @@ async def lifespan(app: FastAPI):
         logger.error("No accounts configured in credentials.json")
         raise RuntimeError("No accounts configured in credentials.json")
     
-    # Determine start index from state.json
     start_index = app.state.account_manager._current_account_index
-    
-    # Try to initialize accounts (full circle)
     initialized = False
     
     for i in range(len(all_accounts)):
@@ -486,6 +483,25 @@ async def lifespan(app: FastAPI):
         
         logger.info(f"Attempting to initialize account: {account_id}")
         
+        # FIX: Force the type checking dictionary lookups to associate correctly
+        # If the manager created this account ID from a folder scan, inject a runtime config fallback
+        account_obj = app.state.account_manager._accounts.get(account_id)
+        
+        # Check if the credentials configuration layout mapping is missing
+        has_config = any(
+            Path(entry.get("path", "")).expanduser().resolve() == Path(account_id).resolve()
+            for entry in app.state.account_manager._credentials_config if entry.get("type") in ("json", "sqlite")
+        )
+        
+        if not has_config:
+            # Inject dynamic configuration dictionary mapping so _initialize_account does not crash
+            logger.debug(f"Dynamic Fix: Injecting directory scan mapping entry for {account_id}")
+            app.state.account_manager._credentials_config.append({
+                "type": "json" if account_id.endswith(".json") else "sqlite",
+                "path": account_id,
+                "enabled": True
+            })
+            
         success = await app.state.account_manager._initialize_account(account_id)
         
         if success:
@@ -494,7 +510,7 @@ async def lifespan(app: FastAPI):
             break
         else:
             logger.warning(f"Failed to initialize account: {account_id}")
-    
+            
     if not initialized:
         logger.error("Failed to initialize any account. Check your credentials.")
         raise RuntimeError("Failed to initialize any account")
