@@ -483,24 +483,24 @@ async def lifespan(app: FastAPI):
         
         logger.info(f"Attempting to initialize account: {account_id}")
         
-        # FIX: Force the type checking dictionary lookups to associate correctly
-        # If the manager created this account ID from a folder scan, inject a runtime config fallback
-        account_obj = app.state.account_manager._accounts.get(account_id)
+        # Safely extract credentials config to support both production and Mock objects in tests
+        credentials_config = getattr(app.state.account_manager, "_credentials_config", None)
         
-        # Check if the credentials configuration layout mapping is missing
-        has_config = any(
-            Path(entry.get("path", "")).expanduser().resolve() == Path(account_id).resolve()
-            for entry in app.state.account_manager._credentials_config if entry.get("type") in ("json", "sqlite")
-        )
-        
-        if not has_config:
-            # Inject dynamic configuration dictionary mapping so _initialize_account does not crash
-            logger.debug(f"Dynamic Fix: Injecting directory scan mapping entry for {account_id}")
-            app.state.account_manager._credentials_config.append({
-                "type": "json" if account_id.endswith(".json") else "sqlite",
-                "path": account_id,
-                "enabled": True
-            })
+        if credentials_config is not None and isinstance(credentials_config, list):
+            # Check if the specific account file path layout configuration mapping is missing
+            has_config = any(
+                Path(entry.get("path", "")).expanduser().resolve() == Path(account_id).resolve()
+                for entry in credentials_config if entry.get("type") in ("json", "sqlite")
+            )
+            
+            if not has_config:
+                # Inject dynamic configuration dictionary mapping so _initialize_account does not crash
+                logger.debug(f"Dynamic Fix: Injecting directory scan mapping entry for {account_id}")
+                credentials_config.append({
+                    "type": "json" if account_id.endswith(".json") else "sqlite",
+                    "path": account_id,
+                    "enabled": True
+                })
             
         success = await app.state.account_manager._initialize_account(account_id)
         
